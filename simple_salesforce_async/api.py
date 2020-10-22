@@ -11,11 +11,11 @@ import re
 from collections import OrderedDict, namedtuple
 from urllib.parse import urljoin, urlparse
 
-import requests
+import aiohttp
 
 from .bulk import SFBulkHandler
 from .exceptions import SalesforceGeneralError
-from .login import SalesforceLogin
+from .login import AsyncSalesforceLogin
 from .util import date_to_iso8601, exception_handler
 
 # pylint: disable=invalid-name
@@ -26,8 +26,14 @@ Usage = namedtuple('Usage', 'used total')
 PerAppUsage = namedtuple('PerAppUsage', 'used total name')
 
 
+async def create_salesforce_client(*args, **kwargs):
+    sf = AsyncSalesforce()
+    await sf._init(*args, **kwargs)
+    return sf
+
+
 # pylint: disable=too-many-instance-attributes
-class Salesforce:
+class AsyncSalesforce:
     """Salesforce Instance
 
     An instance of Salesforce is a handy way to wrap a Salesforce session
@@ -35,7 +41,7 @@ class Salesforce:
     """
 
     # pylint: disable=too-many-arguments,too-many-locals,too-many-branches
-    def __init__(
+    async def _init(
         self,
         username=None,
         password=None,
@@ -45,7 +51,6 @@ class Salesforce:
         instance_url=None,
         organizationId=None,
         version=DEFAULT_API_VERSION,
-        proxies=None,
         session=None,
         client_id=None,
         domain=None,
@@ -86,10 +91,9 @@ class Salesforce:
         Universal Kwargs:
         * version -- the version of the Salesforce API to use, for example
                      `29.0`
-        * proxies -- the optional map of scheme to proxy server
         * session -- Custom requests session, created in calling code. This
                      enables the use of requests Session features not otherwise
-                     exposed by simple_salesforce.
+                     exposed by simple_salesforce_async.
 
         """
 
@@ -100,17 +104,7 @@ class Salesforce:
         # domain kwargs
         self.sf_version = version
         self.domain = domain
-        self.session = session or requests.Session()
-        self.proxies = self.session.proxies
-        # override custom session proxies dance
-        if proxies is not None:
-            if not session:
-                self.session.proxies = self.proxies = proxies
-            else:
-                logger.warning(
-                    'Proxies must be defined on custom session object, '
-                    'ignoring proxies: %s', proxies
-                )
+        self.session = session or aiohttp.ClientSession()
 
         # Determine if the user wants to use our username/password auth or pass
         # in their own information
@@ -119,13 +113,12 @@ class Salesforce:
             self.auth_type = "password"
 
             # Pass along the username/password to our login helper
-            self.session_id, self.sf_instance = SalesforceLogin(
+            self.session_id, self.sf_instance = await AsyncSalesforceLogin(
                 session=self.session,
                 username=username,
                 password=password,
                 security_token=security_token,
                 sf_version=self.sf_version,
-                proxies=self.proxies,
                 client_id=client_id,
                 domain=self.domain)
 
@@ -146,13 +139,12 @@ class Salesforce:
             self.auth_type = 'ipfilter'
 
             # Pass along the username/password to our login helper
-            self.session_id, self.sf_instance = SalesforceLogin(
+            self.session_id, self.sf_instance = await AsyncSalesforceLogin(
                 session=self.session,
                 username=username,
                 password=password,
                 organizationId=organizationId,
                 sf_version=self.sf_version,
-                proxies=self.proxies,
                 client_id=client_id,
                 domain=self.domain)
 
@@ -161,12 +153,11 @@ class Salesforce:
             self.auth_type = "jwt-bearer"
 
             # Pass along the username/password to our login helper
-            self.session_id, self.sf_instance = SalesforceLogin(
+            self.session_id, self.sf_instance = await AsyncSalesforceLogin(
                 session=self.session,
                 username=username,
                 consumer_key=consumer_key,
                 privatekey_file=privatekey_file,
-                proxies=self.proxies,
                 domain=self.domain)
 
         else:
@@ -194,7 +185,13 @@ class Salesforce:
 
         self.api_usage = {}
 
-    def describe(self, **kwargs):
+    async def __aenter__(self, *args, **kwargs):
+        await self._init(*args, **kwargs)
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.session.close()
+
+    async def describe(self, **kwargs):
         """Describes all available objects
 
         Arguments:
@@ -202,9 +199,9 @@ class Salesforce:
         * keyword arguments supported by requests.request (e.g. json, timeout)
         """
         url = self.base_url + "sobjects"
-        result = self._call_salesforce('GET', url, name='describe', **kwargs)
+        result = await self._call_salesforce('GET', url, name='describe', **kwargs)
 
-        json_result = result.json(object_pairs_hook=OrderedDict)
+        json_result = await result.json()
         if len(json_result) == 0:
             return None
 
@@ -228,19 +225,18 @@ class Salesforce:
         # fix to enable serialization
         # (https://github.com/heroku/simple-salesforce/issues/60)
         if name.startswith('__'):
-            return super(Salesforce, self).__getattr__(name)
+            return super(AsyncSalesforce, self).__getattr__(name)
 
         if name == 'bulk':
             # Deal with bulk API functions
-            return SFBulkHandler(self.session_id, self.bulk_url, self.proxies,
-                                 self.session)
+            return SFBulkHandler(self.session_id, self.bulk_url, self.session)
 
         return SFType(
             name, self.session_id, self.sf_instance, sf_version=self.sf_version,
-            proxies=self.proxies, session=self.session)
+            session=self.session)
 
     # User utility methods
-    def set_password(self, user, password):
+    async def set_password(self, user, password):
         """Sets the password of a user
 
         salesforce dev documentation link:
@@ -255,7 +251,7 @@ class Salesforce:
         url = self.base_url + 'sobjects/User/%s/password' % user
         params = {'NewPassword': password}
 
-        result = self._call_salesforce('POST', url, data=json.dumps(params))
+        result = await self._call_salesforce('POST', url, data=json.dumps(params))
 
         # salesforce return 204 No Content when the request is successful
         if result.status_code != 200 and result.status_code != 204:
@@ -263,14 +259,14 @@ class Salesforce:
                                          result.status_code,
                                          'User',
                                          result.content)
-        json_result = result.json(object_pairs_hook=OrderedDict)
+        json_result = await result.json()
         if len(json_result) == 0:
             return None
 
         return json_result
 
     # Generic Rest Function
-    def restful(self, path, params=None, method='GET', **kwargs):
+    async def restful(self, path, params=None, method='GET', **kwargs):
         """Allows you to make a direct REST call if you know the path
 
         Arguments:
@@ -283,17 +279,17 @@ class Salesforce:
         """
 
         url = self.base_url + path
-        result = self._call_salesforce(method, url, name=path, params=params,
+        result = await self._call_salesforce(method, url, name=path, params=params,
                                        **kwargs)
 
-        json_result = result.json(object_pairs_hook=OrderedDict)
+        json_result = await result.json()
         if len(json_result) == 0:
             return None
 
         return json_result
 
     # Search Functions
-    def search(self, search):
+    async def search(self, search):
         """Returns the result of a Salesforce search as a dict decoded from
         the Salesforce response JSON payload.
 
@@ -306,15 +302,15 @@ class Salesforce:
 
         # `requests` will correctly encode the query string passed as `params`
         params = {'q': search}
-        result = self._call_salesforce('GET', url, name='search', params=params)
+        result = await self._call_salesforce('GET', url, name='search', params=params)
 
-        json_result = result.json(object_pairs_hook=OrderedDict)
+        json_result = await result.json()
         if len(json_result) == 0:
             return None
 
         return json_result
 
-    def quick_search(self, search):
+    async def quick_search(self, search):
         """Returns the result of a Salesforce search as a dict decoded from
         the Salesforce response JSON payload.
 
@@ -325,22 +321,22 @@ class Salesforce:
                     sent to Salesforce
         """
         search_string = 'FIND {{{search_string}}}'.format(search_string=search)
-        return self.search(search_string)
+        return await self.search(search_string)
 
-    def limits(self, **kwargs):
+    async def limits(self, **kwargs):
         """Return the result of a Salesforce request to list Organization
         limits.
         """
         url = self.base_url + 'limits/'
-        result = self._call_salesforce('GET', url, **kwargs)
+        result = await self._call_salesforce('GET', url, **kwargs)
 
-        if result.status_code != 200:
+        if result.status != 200:
             exception_handler(result)
 
-        return result.json(object_pairs_hook=OrderedDict)
+        return await result.json()
 
     # Query Handler
-    def query(self, query, include_deleted=False, **kwargs):
+    async def query(self, query, include_deleted=False, **kwargs):
         """Return the result of a Salesforce SOQL query as a dict decoded from
         the Salesforce response JSON payload.
 
@@ -353,12 +349,12 @@ class Salesforce:
         url = self.base_url + ('queryAll/' if include_deleted else 'query/')
         params = {'q': query}
         # `requests` will correctly encode the query string passed as `params`
-        result = self._call_salesforce('GET', url, name='query',
+        result = await self._call_salesforce('GET', url, name='query',
                                        params=params, **kwargs)
 
-        return result.json(object_pairs_hook=OrderedDict)
+        return await result.json()
 
-    def query_more(
+    async def query_more(
             self, next_records_identifier, identifier_is_url=False,
             include_deleted=False, **kwargs):
         """Retrieves more results from a query that returned more results
@@ -388,11 +384,11 @@ class Salesforce:
             url = self.base_url + '{query_endpoint}/{next_record_id}'
             url = url.format(query_endpoint=endpoint,
                              next_record_id=next_records_identifier)
-        result = self._call_salesforce('GET', url, name='query_more', **kwargs)
+        result = await self._call_salesforce('GET', url, name='query_more', **kwargs)
 
-        return result.json(object_pairs_hook=OrderedDict)
+        return await result.json()
 
-    def query_all_iter(self, query, include_deleted=False, **kwargs):
+    async def query_all_iter(self, query, include_deleted=False, **kwargs):
         """This is a lazy alternative to `query_all` - it does not construct
         the whole result set into one container, but returns objects from each
         page it retrieves from the API.
@@ -412,18 +408,17 @@ class Salesforce:
         * include_deleted -- True if the query should include deleted records.
         """
 
-        result = self.query(query, include_deleted=include_deleted, **kwargs)
+        result = await self.query(query, include_deleted=include_deleted, **kwargs)
         while True:
             for record in result['records']:
                 yield record
             # fetch next batch if we're not done else break out of loop
             if not result['done']:
-                result = self.query_more(result['nextRecordsUrl'],
-                                         identifier_is_url=True)
+                result = await self.query_more(result['nextRecordsUrl'], identifier_is_url=True)
             else:
                 return
 
-    def query_all(self, query, include_deleted=False, **kwargs):
+    async def query_all(self, query, include_deleted=False, **kwargs):
         """Returns the full set of results for the `query`. This is a
         convenience
         wrapper around `query(...)` and `query_more(...)`.
@@ -440,8 +435,7 @@ class Salesforce:
         * include_deleted -- True if the query should include deleted records.
         """
 
-        records = self.query_all_iter(query, include_deleted=include_deleted,
-                                      **kwargs)
+        records = await self.query_all_iter(query, include_deleted=include_deleted, **kwargs)
         all_records = list(records)
         return {
             'records': all_records,
@@ -449,8 +443,7 @@ class Salesforce:
             'done': True,
         }
 
-
-    def apexecute(self, action, method='GET', data=None, **kwargs):
+    async def apexecute(self, action, method='GET', data=None, **kwargs):
         """Makes an HTTP request to an APEX REST endpoint
 
         Arguments:
@@ -463,21 +456,21 @@ class Salesforce:
         # If data is None, we should send an empty body, not "null", which is
         # None in json.
         json_data = json.dumps(data) if data is not None else None
-        result = self._call_salesforce(
+        result = await self._call_salesforce(
             method,
             self.apex_url + action,
             name="apexexcute",
             data=json_data, **kwargs
         )
         try:
-            response_content = result.json()
+            response_content = await result.json()
         # pylint: disable=broad-except
         except Exception:
             response_content = result.text
 
         return response_content
 
-    def _call_salesforce(self, method, url, name="", **kwargs):
+    async def _call_salesforce(self, method, url, name="", **kwargs):
         """Utility method for performing HTTP call to Salesforce.
 
         Returns a `requests.result` object.
@@ -486,10 +479,11 @@ class Salesforce:
         additional_headers = kwargs.pop('headers', dict())
         headers.update(additional_headers)
 
-        result = self.session.request(
-            method, url, headers=headers, **kwargs)
+        aiohttp_method = getattr(self.session, method.lower())
 
-        if result.status_code >= 300:
+        result = await aiohttp_method(url, headers=headers, **kwargs)
+
+        if result.status >= 300:
             exception_handler(result, name=name)
 
         sforce_limit_info = result.headers.get('Sforce-Limit-Info')
@@ -539,7 +533,6 @@ class SFType:
         session_id,
         sf_instance,
         sf_version=DEFAULT_API_VERSION,
-        proxies=None,
         session=None,
     ):
         """Initialize the instance with the given parameters.
@@ -551,17 +544,13 @@ class SFType:
         * session_id -- the session ID for authenticating to Salesforce
         * sf_instance -- the domain of the instance of Salesforce to use
         * sf_version -- the version of the Salesforce API to use
-        * proxies -- the optional map of scheme to proxy server
         * session -- Custom requests session, created in calling code. This
                      enables the use of requests Session features not otherwise
-                     exposed by simple_salesforce.
+                     exposed by simple_salesforce_async.
         """
         self.session_id = session_id
         self.name = object_name
-        self.session = session or requests.Session()
-        # don't wipe out original proxies with None
-        if not session and proxies is not None:
-            self.session.proxies = proxies
+        self.session = session or aiohttp.ClientSession()
         self.api_usage = {}
 
         self.base_url = (
@@ -570,7 +559,7 @@ class SFType:
                                      object_name=object_name,
                                      sf_version=sf_version))
 
-    def metadata(self, headers=None):
+    async def metadata(self, headers=None):
         """Returns the result of a GET to `.../{object_name}/` as a dict
         decoded from the JSON payload returned by Salesforce.
 
@@ -578,10 +567,10 @@ class SFType:
 
         * headers -- a dict with additional request headers.
         """
-        result = self._call_salesforce('GET', self.base_url, headers=headers)
-        return result.json(object_pairs_hook=OrderedDict)
+        result = await self._call_salesforce('GET', self.base_url, headers=headers)
+        return await result.json()
 
-    def describe(self, headers=None):
+    async def describe(self, headers=None):
         """Returns the result of a GET to `.../{object_name}/describe` as a
         dict decoded from the JSON payload returned by Salesforce.
 
@@ -589,13 +578,13 @@ class SFType:
 
         * headers -- a dict with additional request headers.
         """
-        result = self._call_salesforce(
+        result = await self._call_salesforce(
             method='GET', url=urljoin(self.base_url, 'describe'),
             headers=headers
         )
-        return result.json(object_pairs_hook=OrderedDict)
+        return await result.json()
 
-    def describe_layout(self, record_id, headers=None):
+    async def describe_layout(self, record_id, headers=None):
         """Returns the layout of the object
 
         Returns the result of a GET to
@@ -610,14 +599,14 @@ class SFType:
         custom_url_part = 'describe/layouts/{record_id}'.format(
             record_id=record_id
         )
-        result = self._call_salesforce(
+        result = await self._call_salesforce(
             method='GET',
             url=urljoin(self.base_url, custom_url_part),
             headers=headers
         )
-        return result.json(object_pairs_hook=OrderedDict)
+        return await result.json()
 
-    def get(self, record_id, headers=None):
+    async def get(self, record_id, headers=None):
         """Returns the result of a GET to `.../{object_name}/{record_id}` as a
         dict decoded from the JSON payload returned by Salesforce.
 
@@ -626,13 +615,13 @@ class SFType:
         * record_id -- the Id of the SObject to get
         * headers -- a dict with additional request headers.
         """
-        result = self._call_salesforce(
+        result = await self._call_salesforce(
             method='GET', url=urljoin(self.base_url, record_id),
             headers=headers
         )
-        return result.json(object_pairs_hook=OrderedDict)
+        return await result.json()
 
-    def get_by_custom_id(self, custom_id_field, custom_id, headers=None):
+    async def get_by_custom_id(self, custom_id_field, custom_id, headers=None):
         """Return an ``SFType`` by custom ID
 
         Returns the result of a GET to
@@ -651,12 +640,12 @@ class SFType:
                 custom_id_field=custom_id_field, custom_id=custom_id
             )
         )
-        result = self._call_salesforce(
+        result = await self._call_salesforce(
             method='GET', url=custom_url, headers=headers
         )
-        return result.json(object_pairs_hook=OrderedDict)
+        return await result.json()
 
-    def create(self, data, headers=None):
+    async def create(self, data, headers=None):
         """Creates a new SObject using a POST to `.../{object_name}/`.
 
         Returns a dict decoded from the JSON payload returned by Salesforce.
@@ -667,13 +656,13 @@ class SFType:
                   JSON-encoded before being transmitted.
         * headers -- a dict with additional request headers.
         """
-        result = self._call_salesforce(
+        result = await self._call_salesforce(
             method='POST', url=self.base_url,
             data=json.dumps(data), headers=headers
         )
-        return result.json(object_pairs_hook=OrderedDict)
+        return await result.json()
 
-    def upsert(self, record_id, data, raw_response=False, headers=None):
+    async def upsert(self, record_id, data, raw_response=False, headers=None):
         """Creates or updates an SObject using a PATCH to
         `.../{object_name}/{record_id}`.
 
@@ -691,13 +680,13 @@ class SFType:
                           directly, instead of the status code.
         * headers -- a dict with additional request headers.
         """
-        result = self._call_salesforce(
+        result = await self._call_salesforce(
             method='PATCH', url=urljoin(self.base_url, record_id),
             data=json.dumps(data), headers=headers
         )
         return self._raw_response(result, raw_response)
 
-    def update(self, record_id, data, raw_response=False, headers=None):
+    async def update(self, record_id, data, raw_response=False, headers=None):
         """Updates an SObject using a PATCH to
         `.../{object_name}/{record_id}`.
 
@@ -714,13 +703,13 @@ class SFType:
                           directly, instead of the status code.
         * headers -- a dict with additional request headers.
         """
-        result = self._call_salesforce(
+        result = await self._call_salesforce(
             method='PATCH', url=urljoin(self.base_url, record_id),
             data=json.dumps(data), headers=headers
         )
         return self._raw_response(result, raw_response)
 
-    def delete(self, record_id, raw_response=False, headers=None):
+    async def delete(self, record_id, raw_response=False, headers=None):
         """Deletes an SObject using a DELETE to
         `.../{object_name}/{record_id}`.
 
@@ -735,13 +724,13 @@ class SFType:
                           directly, instead of the status code.
         * headers -- a dict with additional request headers.
         """
-        result = self._call_salesforce(
+        result = await self._call_salesforce(
             method='DELETE', url=urljoin(self.base_url, record_id),
             headers=headers
         )
         return self._raw_response(result, raw_response)
 
-    def deleted(self, start, end, headers=None):
+    async def deleted(self, start, end, headers=None):
         # pylint: disable=line-too-long
         """Gets a list of deleted records
 
@@ -758,10 +747,10 @@ class SFType:
                 start=date_to_iso8601(start), end=date_to_iso8601(end)
             )
         )
-        result = self._call_salesforce(method='GET', url=url, headers=headers)
-        return result.json(object_pairs_hook=OrderedDict)
+        result = await self._call_salesforce(method='GET', url=url, headers=headers)
+        return await result.json()
 
-    def updated(self, start, end, headers=None):
+    async def updated(self, start, end, headers=None):
         # pylint: disable=line-too-long
         """Gets a list of updated records
 
@@ -779,10 +768,10 @@ class SFType:
                 start=date_to_iso8601(start), end=date_to_iso8601(end)
             )
         )
-        result = self._call_salesforce(method='GET', url=url, headers=headers)
-        return result.json(object_pairs_hook=OrderedDict)
+        result = await self._call_salesforce(method='GET', url=url, headers=headers)
+        return await result.json()
 
-    def _call_salesforce(self, method, url, **kwargs):
+    async def _call_salesforce(self, method, url, **kwargs):
         """Utility method for performing HTTP call to Salesforce.
 
         Returns a `requests.result` object.
@@ -794,14 +783,17 @@ class SFType:
         }
         additional_headers = kwargs.pop('headers', dict())
         headers.update(additional_headers or dict())
-        result = self.session.request(method, url, headers=headers, **kwargs)
 
-        if result.status_code >= 300:
+        aiohttp_method = getattr(self.session, method.lower())
+
+        result = await aiohttp_method(url, headers=headers, **kwargs)
+
+        if result.status >= 300:
             exception_handler(result, self.name)
 
         sforce_limit_info = result.headers.get('Sforce-Limit-Info')
         if sforce_limit_info:
-            self.api_usage = Salesforce.parse_api_usage(sforce_limit_info)
+            self.api_usage = AsyncSalesforce.parse_api_usage(sforce_limit_info)
 
         return result
 

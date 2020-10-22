@@ -9,7 +9,7 @@ from setuptools import setup
 here = os.path.abspath(os.path.dirname(__file__))
 
 about = {}
-with open(os.path.join(here, 'simple_salesforce', '__version__.py'), 'r') as f:
+with open(os.path.join(here, 'simple_salesforce_async', '__version__.py'), 'r') as f:
     exec(f.read(), about)
 
 
@@ -20,21 +20,15 @@ setup(
     author_email=about['__author_email__'],
     maintainer=about['__maintainer__'],
     maintainer_email=about['__maintainer_email__'],
-    packages=['simple_salesforce',],
+    packages=['simple_salesforce_async',],
     url=about['__url__'],
     license=about['__license__'],
     description=about['__description__'],
     long_description=textwrap.dedent(open('README.rst', 'r').read()),
     install_requires=[
-        'requests>=2.22.0',
+        'aiohttp',
         'authlib'
     ],
-    tests_require=[
-        'nose>=1.3.0',
-        'pytz>=2014.1.1',
-        'responses>=0.5.1',
-    ],
-    test_suite='nose.collector',
     keywords=about['__keywords__'],
     classifiers=[
         'Development Status :: 5 - Production/Stable',

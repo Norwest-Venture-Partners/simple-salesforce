@@ -68,7 +68,7 @@ def exception_handler(result, name=""):
     raise exc_cls(result.url, result.status_code, name, response_content)
 
 
-def call_salesforce(url, method, session, headers, **kwargs):
+async def async_call_salesforce(url, method, session, headers, **kwargs):
     """Utility method for performing HTTP call to Salesforce.
 
     Returns a `requests.result` object.
@@ -76,9 +76,10 @@ def call_salesforce(url, method, session, headers, **kwargs):
 
     additional_headers = kwargs.pop('additional_headers', dict())
     headers.update(additional_headers or dict())
-    result = session.request(method, url, headers=headers, **kwargs)
+    aiohttp_method = getattr(session, method.lower())
+    result = await aiohttp_method(url, headers=headers, **kwargs)
 
-    if result.status_code >= 300:
+    if result.status >= 300:
         exception_handler(result)
 
     return result

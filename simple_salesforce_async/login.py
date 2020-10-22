@@ -12,7 +12,6 @@ from datetime import datetime, timedelta
 from html import escape
 from json.decoder import JSONDecodeError
 
-import requests
 from authlib.jose import jwt
 
 from .api import DEFAULT_API_VERSION
@@ -21,13 +20,12 @@ from .util import getUniqueElementValueFromXmlString
 
 
 # pylint: disable=invalid-name,too-many-arguments,too-many-locals
-def SalesforceLogin(
+async def AsyncSalesforceLogin(
     username=None,
     password=None,
     security_token=None,
     organizationId=None,
     sf_version=DEFAULT_API_VERSION,
-    proxies=None,
     session=None,
     client_id=None,
     domain=None,
@@ -47,10 +45,9 @@ def SalesforceLogin(
             NOTE: security_token an organizationId are mutually exclusive
     * sf_version -- the version of the Salesforce API to use, for example
                     "27.0"
-    * proxies -- the optional map of scheme to proxy server
     * session -- Custom requests session, created in calling code. This
                  enables the use of requets Session features not otherwise
-                 exposed by simple_salesforce.
+                 exposed by simple_salesforce_async.
     * client_id -- the ID of this client
     * domain -- The domain to using for connecting to Salesforce. Use
                 common domains, such as 'login' or 'test', or
@@ -172,11 +169,11 @@ def SalesforceLogin(
             'assertion': assertion
         }
 
-        return token_login(
+        return await async_token_login(
             'https://{domain}.salesforce.com/services/oauth2/token'.format(
                 domain=domain),
             login_token_request_data, domain, consumer_key,
-            None, proxies, session)
+            None, session)
     else:
         except_code = 'INVALID AUTH'
         except_msg = (
@@ -191,26 +188,27 @@ def SalesforceLogin(
         'SOAPAction': 'login'
     }
 
-    return soap_login(soap_url, login_soap_request_body,
-        login_soap_request_headers, proxies, session)
+    return await async_soap_login(soap_url, login_soap_request_body, login_soap_request_headers, session)
 
 
-def soap_login(soap_url, request_body, headers, proxies, session=None):
+async def async_soap_login(soap_url, request_body, headers, session):
     """Process SOAP specific login workflow."""
-    response = (session or requests).post(
-        soap_url, request_body, headers=headers, proxies=proxies)
+    response = await session.post(
+        soap_url, data=request_body, headers=headers)
 
-    if response.status_code != 200:
+    response_data = await response.text()
+
+    if response.status != 200:
         except_code = getUniqueElementValueFromXmlString(
-            response.content, 'sf:exceptionCode')
+            response_data, 'sf:exceptionCode')
         except_msg = getUniqueElementValueFromXmlString(
-            response.content, 'sf:exceptionMessage')
+            response_data, 'sf:exceptionMessage')
         raise SalesforceAuthenticationFailed(except_code, except_msg)
 
     session_id = getUniqueElementValueFromXmlString(
-        response.content, 'sessionId')
+        response_data, 'sessionId')
     server_url = getUniqueElementValueFromXmlString(
-        response.content, 'serverUrl')
+        response_data, 'serverUrl')
 
     sf_instance = (server_url
                    .replace('http://', '')
@@ -221,20 +219,19 @@ def soap_login(soap_url, request_body, headers, proxies, session=None):
     return session_id, sf_instance
 
 
-def token_login(token_url, token_data, domain, consumer_key,
-                headers, proxies, session=None):
+async def async_token_login(token_url, token_data, domain, consumer_key, headers, session=None):
     """Process OAuth 2.0 JWT Bearer Token Flow."""
-    response = (session or requests).post(
-        token_url, token_data, headers=headers, proxies=proxies)
+    response = await session.post(
+        token_url, data=token_data, headers=headers)
 
     try:
         json_response = response.json()
     except JSONDecodeError:
         raise SalesforceAuthenticationFailed(
-            response.status_code, response.text
+            response.status, response.text
         )
 
-    if response.status_code != 200:
+    if response.status != 200:
         except_code = json_response.get('error')
         except_msg = json_response.get('error_description')
         if except_msg == "user hasn't approved this consumer":
