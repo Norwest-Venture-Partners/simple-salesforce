@@ -109,7 +109,7 @@ class AsyncSalesforce:
         # Determine if the user wants to use our username/password auth or pass
         # in their own information
         if all(arg is not None for arg in (
-                username, password, security_token)):
+            username, password, security_token)):
             self.auth_type = "password"
 
             # Pass along the username/password to our login helper
@@ -123,7 +123,7 @@ class AsyncSalesforce:
                 domain=self.domain)
 
         elif all(arg is not None for arg in (
-                session_id, instance or instance_url)):
+            session_id, instance or instance_url)):
             self.auth_type = "direct"
             self.session_id = session_id
 
@@ -135,7 +135,7 @@ class AsyncSalesforce:
                 self.sf_instance = instance
 
         elif all(arg is not None for arg in (
-                username, password, organizationId)):
+            username, password, organizationId)):
             self.auth_type = 'ipfilter'
 
             # Pass along the username/password to our login helper
@@ -149,7 +149,7 @@ class AsyncSalesforce:
                 domain=self.domain)
 
         elif all(arg is not None for arg in (
-                username, consumer_key, privatekey_file)):
+            username, consumer_key, privatekey_file)):
             self.auth_type = "jwt-bearer"
 
             # Pass along the username/password to our login helper
@@ -280,7 +280,7 @@ class AsyncSalesforce:
 
         url = self.base_url + path
         result = await self._call_salesforce(method, url, name=path, params=params,
-                                       **kwargs)
+                                             **kwargs)
 
         json_result = await result.json()
         if len(json_result) == 0:
@@ -350,13 +350,13 @@ class AsyncSalesforce:
         params = {'q': query}
         # `requests` will correctly encode the query string passed as `params`
         result = await self._call_salesforce('GET', url, name='query',
-                                       params=params, **kwargs)
+                                             params=params, **kwargs)
 
         return await result.json()
 
     async def query_more(
-            self, next_records_identifier, identifier_is_url=False,
-            include_deleted=False, **kwargs):
+        self, next_records_identifier, identifier_is_url=False,
+        include_deleted=False, **kwargs):
         """Retrieves more results from a query that returned more results
         than the batch maximum. Returns a dict decoded from the Salesforce
         response JSON payload.
@@ -435,8 +435,8 @@ class AsyncSalesforce:
         * include_deleted -- True if the query should include deleted records.
         """
 
-        records = await self.query_all_iter(query, include_deleted=include_deleted, **kwargs)
-        all_records = list(records)
+        records = self.query_all_iter(query, include_deleted=include_deleted, **kwargs)
+        all_records = [x async for x in records]
         return {
             'records': all_records,
             'totalSize': len(all_records),
