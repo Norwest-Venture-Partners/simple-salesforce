@@ -63,9 +63,9 @@ def exception_handler(result, name=""):
         403: SalesforceRefusedRequest,
         404: SalesforceResourceNotFound,
     }
-    exc_cls = exc_map.get(result.status_code, SalesforceGeneralError)
+    exc_cls = exc_map.get(result.status, SalesforceGeneralError)
 
-    raise exc_cls(result.url, result.status_code, name, response_content)
+    raise exc_cls(result.url, result.status, name, response_content)
 
 
 async def async_call_salesforce(url, method, session, headers, **kwargs):
